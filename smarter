@@ -1,0 +1,145 @@
+<?php
+$sourceMail = $argv[1];
+$sourcePassword = $argv[2];
+$sourceServer = "";
+$sourcePort = "143";
+$destinationServer = "";
+$adminUsername = "";
+$adminPassword = "";
+$sourceUsername = explode('@',$sourceMail)[0];
+$sourceDomain = explode('@',$sourceMail)[1];
+
+$userAdminWsdl = "http://$destinationServer/Services/svcUserAdmin.asmx?wsdl";
+
+$options = array(
+   'uri'=>'http://schemas.xmlsoap.org/soap/envelope/',
+   'style'=>SOAP_RPC,
+        'use'=>SOAP_ENCODED,
+        'soap_version'=>SOAP_1_2,
+        'cache_wsdl'=>WSDL_CACHE_NONE,
+        'connection_timeout'=>15,
+        'trace'=>true,
+        'encoding'=>'UTF-8',
+        'exceptions'=>true);
+
+function createMailBox() {
+
+global $db,$options,$userAdminWsdl,$sourceMail,$sourcePassword,$sourceServer,$sourcePort,$destinationServer,$adminUsername,$adminPassword,$sourceUsername,$sourceDomain;
+
+ $params = array(
+                        "AuthUserName" =>$adminUsername ,
+                        "AuthPassword" => $adminPassword,
+                        "NewUsername" => $sourceUsername,
+                        "NewPassword" => $sourcePassword,
+                        "DomainName" => $sourceDomain,
+                        "FirstName" => $sourceUsername,
+                        "LastName" => $sourceDomain,
+                        "IsDomainAdmin" => "0",
+                        "maxMailboxSize" => "1000");
+                $smarterMail = new soapclient($userAdminWsdl, $options);
+                $addUserResult=$smarterMail->AddUser2($params);
+                if ($addUserResult->AddUser2Result->Result or $addUserResult->AddUser2Result->ResultCode == '-6') {
+                        if ($addUserResult->AddUser2Result->ResultCode == '-6') {
+                             $stmt = $db->prepare("UPDATE mailbox SET password =:password WHERE username =:username and password =:password");
+                             $stmt->bindValue(':username', $sourceMail, SQLITE3_TEXT);
+                             $stmt->bindValue(':password', $sourcePassword, SQLITE3_TEXT);
+                             $stmt->execute();
+                             exit;
+                        }
+                        echo 'User created successfully.';
+                        $stmt = $db->prepare("UPDATE mailbox SET mailbox =:message WHERE username =:username and password =:password");
+                        $stmt->bindValue(':message', "ok", SQLITE3_TEXT);
+                        $stmt->bindValue(':username', $sourceMail, SQLITE3_TEXT);
+                        $stmt->bindValue(':password', $sourcePassword, SQLITE3_TEXT);
+                        $stmt->execute();
+                        }else {
+                        echo 'Error in user creation!';
+                        $message = $addUserResult->AddUser2Result->Message;
+                        $stmt = $db->prepare("UPDATE mailbox SET mailbox =:message WHERE username =:username and password =:password");
+                        $stmt->bindValue(':message', $message, SQLITE3_TEXT);
+                        $stmt->bindValue(':username', $sourceMail, SQLITE3_TEXT);
+                        $stmt->bindValue(':password', $sourcePassword, SQLITE3_TEXT);
+                        $stmt->execute();
+                        exit;
+                }
+}
+function mailBoxMigrate() {
+
+global  $db,$options,$userAdminWsdl,$sourceMail,$sourcePassword,$sourceServer,$sourcePort,$destinationServer,$adminUsername,$adminPassword,$sourceUsername,$sourceDomain;
+
+$params = array(
+                        "AuthUserName" => $adminUsername,
+                        "AuthPassword" => $adminPassword,
+                        "parameters" => array(
+                                        "ACCOUNTTYPE=IMAP",
+                                        "DELETECURRENTMAILBOX=false",
+                                        "DESTINATION=$sourceMail",
+                                        "DOMAIN=",
+                                        "IMPORTITEMS=email",
+                                        "IMPORTTYPE=other",
+                                        "PASSWORD=$sourcePassword",
+                                        "PORT=$sourcePort",
+                                        "SERVERADDRESS=$sourceServer",
+                                        "USERNAME=$sourceMail",
+                                        "USESSL=false"));
+                        $smarterMail = new soapclient($userAdminWsdl, $options);
+                        $migrateResult=$smarterMail->QueueMailBoxMigration($params);
+                        if ($migrateResult->QueueMailBoxMigrationResult->Result) {
+                                echo "Migration started successfully";
+                                $stmt = $db->prepare("UPDATE mailbox SET state =:message WHERE username =:username and password =:password");
+                                $stmt->bindValue(':message', "ok", SQLITE3_TEXT);
+                                $stmt->bindValue(':username', $sourceMail, SQLITE3_TEXT);
+                                $stmt->bindValue(':password', $sourcePassword, SQLITE3_TEXT);
+                                $stmt->execute();
+
+                               exit;
+                        } else {
+                                echo 'Error in migration';
+                                $stmt = $db->prepare("UPDATE mailbox SET state =:message WHERE username =:username and password =:password");
+                                $stmt->bindValue(':message', $migrateResult, SQLITE3_TEXT);
+                                $stmt->bindValue(':username', $sourceMail, SQLITE3_TEXT);
+                                $stmt->bindValue(':password', $sourcePassword, SQLITE3_TEXT);
+                                $stmt->execute();
+                                exit;
+                        }
+}
+
+$db = new SQLite3('migrate.db');
+$tablesquery = $db->query("SELECT name FROM sqlite_master WHERE type='table'");
+$tables = $tablesquery->fetchArray(SQLITE3_ASSOC);
+if (!$tables or !in_array('mailbox',$tables)) {
+    $result = $db->query('CREATE TABLE mailbox (id INTEGER PRIMARY KEY AUTOINCREMENT,username text NOT NULL,password text NOT NULL,mailbox text,state text)');
+}
+$stmt=$db->prepare("SELECT * FROM mailbox WHERE username =:username");
+$stmt->bindValue(':username', $sourceMail, SQLITE3_TEXT);
+$result=$stmt->execute();
+$mailBox = $result->fetchArray(SQLITE3_ASSOC);
+if ($mailBox) {
+        if($mailBox['mailbox'] != 'ok') {
+                createMailBox();
+        }
+        if($mailBox['state'] != 'ok' ) {
+                mailBoxMigrate();
+        } else {
+                echo "successfully migrate ";
+                exit();
+        }
+}
+
+else {
+        $checkIdentity = imap_open('{'.$sourceServer.':'.$sourcePort.'/novalidate-cert}',$sourceMail,$sourcePassword);
+        if (!$checkIdentity) {
+                echo 'No a valid user.';
+                exit;
+        } else {
+                $stmt = $db->prepare("INSERT  INTO  mailbox (username, password) VALUES (:username, :password)");
+                $stmt->bindValue(':username', $sourceMail, SQLITE3_TEXT);
+                $stmt->bindValue(':password', $sourcePassword, SQLITE3_TEXT);
+                $stmt->execute();
+                echo 'Succesful Login.';
+                createMailBox();
+                mailBoxMigrate();
+                exit;
+        }
+}
+?>
